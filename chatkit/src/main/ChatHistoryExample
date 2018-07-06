@@ -1,0 +1,607 @@
+package com.supportop.Chat;
+
+import android.Manifest;
+import android.app.Activity;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.provider.MediaStore;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ImageView;
+import android.widget.Toast;
+
+import com.bumptech.glide.Glide;
+import com.neovisionaries.ws.client.WebSocketException;
+import com.neovisionaries.ws.client.WebSocketFrame;
+import com.supportop.Chat.fixtures.MessagesFixtures;
+import com.supportop.Chat.model.Message;
+import com.supportop.Model.MessagesHistory;
+import com.supportop.Model.UploadImage;
+import com.supportop.R;
+import com.supportop.Service.ApiClient;
+import com.supportop.Storage.SharedPreferencesManager;
+import com.supportop.interfaces.TokenUpdaterCallback;
+import com.supportop.objects.RefreshToken;
+import com.supportop.ui.BaseFragment;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.IOException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
+
+import ChatApp.chatkit.commons.ImageLoader;
+import ChatApp.chatkit.messages.MessageInput;
+import ChatApp.chatkit.messages.MessageList;
+import ChatApp.chatkit.messages.MessagesListAdapter;
+import io.github.sac.Ack;
+import io.github.sac.BasicListener;
+import io.github.sac.Emitter;
+import io.github.sac.ReconnectStrategy;
+import io.github.sac.Socket;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.RequestBody;
+import okhttp3.ResponseBody;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
+
+/**
+ * Created by Hayk.Mkrtchyan on 3/5/18.
+ */
+
+public class ChatFragment extends BaseFragment implements MessageInput.AttachmentsListener {
+
+    private View mainView;
+
+    private ApiClient apiClient;
+
+    private MessageInput messageInput;
+    private MessageList messageList;
+    private MessagesListAdapter<Message> messagesAdapter;
+    private final String senderId = "0";
+    private Socket sc;
+    private final String url = "ws://185.149.141.17:8000/socketcluster/";
+    private static final String TAG = "4564323";
+    private final int CHAT_IMAGE_TYPE = 5;
+    private String myUserName;
+    private String sender;
+    private String receiver;
+    private Message message;
+    int earlierDay;
+    int days = 7;
+    private Calendar mCurrentDate;
+    private Calendar earlierDate;
+    private ArrayList<byte[]> arrayOfImages;
+    private ArrayList<Message> arrayOfMessages;
+    private MessagesHistory[] messagesHistory;
+    private TokenUpdaterCallback tokenUpdaterCallback;
+    private static final String BUNDLE_USER_NAME = "personUserNameBundle";
+    private static final String BUNDLE_USER_ID = "personUserIdBundle";
+    private static final int SELECTED_PICTURE = 1;
+    private static final int STATUS_CODE = 401;
+    private static final int MY_PERMISSIONS_REQUEST_READ_EXTERNAL_STORAGE = 1;
+
+    @Override
+    public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+        mainView = inflater.inflate(R.layout.chat_fragment, container, false);
+
+        apiClient = ApiClient.getInstance();
+
+        Bundle bundle = getArguments();
+        sender = bundle.getString(BUNDLE_USER_NAME);
+        receiver = bundle.getString(BUNDLE_USER_ID);
+        myUserName = SharedPreferencesManager.getInstance().getUserData().getUserName();
+
+        arrayOfImages = new ArrayList<>();
+        arrayOfMessages = new ArrayList<>();
+        messageInput = (MessageInput) mainView.findViewById(R.id.chatKitInput);
+        messageList = (MessageList) mainView.findViewById(R.id.chatKitList);
+        messageInput.setAttachmentsListener(this);
+
+        ImageLoader imageLoader = new ImageLoader() {
+            @Override
+            public void loadImage(ImageView imageView, String s, byte[] imageBytes) {
+                Log.d(TAG, "Glide");
+                if (imageBytes != null) {
+                    Glide.with(getActivity()).load(imageBytes).into(imageView);
+                }
+                if (s != null) {
+                    Glide.with(getActivity()).load(s).into(imageView);
+                }
+            }
+        };
+
+        messagesAdapter = new MessagesListAdapter<>(senderId, imageLoader);
+        messageList.setAdapter(messagesAdapter);
+
+
+        final SimpleDateFormat dateFormat = new SimpleDateFormat(
+                "yyyy-MM-dd", Locale.US);
+
+        mCurrentDate = Calendar.getInstance();
+        int year = mCurrentDate.get(Calendar.YEAR);
+        int month = mCurrentDate.get(Calendar.MONTH);
+        int day = mCurrentDate.get(Calendar.DAY_OF_MONTH) + 1;
+        mCurrentDate.set(year, month, day);
+
+        earlierDate = Calendar.getInstance();
+        int earlierYear = earlierDate.get(Calendar.YEAR);
+        int earlierMonth = earlierDate.get(Calendar.MONTH);
+        earlierDay = earlierDate.get(Calendar.DAY_OF_MONTH) - days;
+        earlierDate.set(earlierYear, earlierMonth, earlierDay);
+
+        String currentTextDate = dateFormat.format(mCurrentDate.getTime());
+        String earlierTextDate = dateFormat.format(earlierDate.getTime());
+
+        getMessages(earlierTextDate, currentTextDate);
+
+        messagesAdapter.setLoadMoreListener(new MessagesListAdapter.OnLoadMoreListener() {
+            @Override
+            public void onLoadMore(int page, int totalItemsCount) {
+                new Handler().postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        int currentYear = earlierDate.get(Calendar.YEAR);
+                        int currentMonth = earlierDate.get(Calendar.MONTH);
+                        int currentDay = earlierDate.get(Calendar.DAY_OF_MONTH);
+
+                        mCurrentDate.set(currentYear, currentMonth, currentDay);
+
+                        int earlierDay = earlierDate.get(Calendar.DAY_OF_MONTH) - days;
+                        int earlierYear = earlierDate.get(Calendar.YEAR);
+                        int earlierMonth = earlierDate.get(Calendar.MONTH);
+
+                        earlierDate.set(earlierYear, earlierMonth, earlierDay);
+
+                        String currentTextDate = dateFormat.format(mCurrentDate.getTime());
+                        String earlierTextDate = dateFormat.format(earlierDate.getTime());
+
+                        getMessages(earlierTextDate, currentTextDate);
+                    }
+                }, 2000);
+            }
+        });
+
+        socketCall();
+
+        return mainView;
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, final Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == SELECTED_PICTURE && resultCode == Activity.RESULT_OK) {
+            Uri uri = data.getData();
+            String selectedImagePath = getPath(uri);
+            final File file = new File(selectedImagePath);
+            uploadChatImage(file, false);
+            tokenUpdaterCallback = new TokenUpdaterCallback() {
+                @Override
+                public void updateToken() {
+                    uploadChatImage(file, true);
+                }
+            };
+        }
+    }
+
+    public String getPath(Uri uri) {
+        String res = null;
+        String[] projection = {MediaStore.Images.Media.DATA};
+        Cursor cursor = getActivity().getContentResolver().query(uri, projection, null, null, null);
+        if (cursor.moveToFirst()) {
+            int column_index = cursor.getColumnIndexOrThrow(projection[0]);
+            res = cursor.getString(column_index);
+        }
+        cursor.close();
+        return res;
+    }
+
+    // 1) Image upload to server
+    public void uploadChatImage(File file, final boolean isTokenUpdated) {
+        RequestBody reqFile = RequestBody.create(MediaType.parse("multipart/form-data"), file);
+        MultipartBody.Part multiPartFile = MultipartBody.Part.createFormData("userFile", file.getName(), reqFile);
+
+        RequestBody receiverBody = RequestBody.create(MediaType.parse("text/plain"), receiver);
+        RequestBody type = RequestBody.create(MediaType.parse("text/plain"), "5");
+
+        Call<UploadImage> uploadChatImageCall = apiClient.uploadChatImage(multiPartFile, type, receiverBody);
+        uploadChatImageCall.enqueue(new Callback<UploadImage>() {
+            @Override
+            public void onResponse(Call<UploadImage> call, final Response<UploadImage> response) {
+                if (response.isSuccessful()) {
+
+                    final String generatedName = response.body().getGeneratedName();
+
+                    getImageAfterUpload(generatedName, false);
+                    tokenUpdaterCallback = new TokenUpdaterCallback() {
+                        @Override
+                        public void updateToken() {
+                            getImageAfterUpload(generatedName, true);
+                        }
+                    };
+                } else {
+                    if (response.code() == STATUS_CODE && !isTokenUpdated) {
+
+                        //call update access token
+                        RefreshToken refreshToken = new RefreshToken(getActivity(), tokenUpdaterCallback);
+                        refreshToken.updateToken();
+                    } else {
+                        Toast.makeText(context, "Response is not successful: " + response.errorBody(), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(Call<UploadImage> call, Throwable t) {
+                Toast.makeText(getActivity(), "An error occurred", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    public void getImageAfterUpload(final String generatedName, final boolean isTokenUpdated) {
+        Call<ResponseBody> getChatImage = apiClient.getImages(generatedName, CHAT_IMAGE_TYPE);
+        getChatImage.enqueue(new Callback<ResponseBody>() {
+            @Override
+            public void onResponse(Call<ResponseBody> call, Response<ResponseBody> response) {
+                if (response.isSuccessful()) {
+
+                    String imgName = "gago+" + generatedName;
+
+                    JSONObject messageObject = new JSONObject();
+
+                    try {
+                        messageObject.put("user", sender);
+                        messageObject.put("msg", imgName);
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                    }
+
+                    sc.emit("messaging", messageObject);
+
+                    sc.getChannelByName(myUserName).publish(imgName, new Ack() {
+                        @Override
+                        public void call(String name, Object error, Object data) {
+                            Log.d(TAG, "Published message to channel: " + name + " successfully");
+                        }
+                    });
+
+                    try {
+                        messagesAdapter.addToStart(MessagesFixtures.getImageBytesMessage(response.body().bytes(), "0"), true);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    if (response.code() == STATUS_CODE && !isTokenUpdated) {
+
+                        //call update access token
+                        RefreshToken refreshToken = new RefreshToken(getActivity(), tokenUpdaterCallback);
+                        refreshToken.updateToken();
+                    } else {
+                        Toast.makeText(context, "Response is not successful: " + response.errorBody(), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(Call<ResponseBody> call, Throwable t) {
+                Toast.makeText(getActivity(), "An error occurred", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    public void getChatImage(final String imageName, final boolean isTokenUpdated, final String id) {
+        Call<ResponseBody> getChatImageCall = apiClient.getImages(imageName, CHAT_IMAGE_TYPE);
+        getChatImageCall.enqueue(new Callback<ResponseBody>() {
+            @Override
+            public void onResponse(Call<ResponseBody> call, final Response<ResponseBody> response) {
+                if (response.isSuccessful()) {
+                    try {
+                        messagesAdapter.addToStart(MessagesFixtures.getImageBytesMessage(response.body().bytes(), id), true);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    if (response.code() == STATUS_CODE && !isTokenUpdated) {
+
+                        //call update access token
+                        RefreshToken refreshToken = new RefreshToken(getActivity(), tokenUpdaterCallback);
+                        refreshToken.updateToken();
+                    } else {
+                        Toast.makeText(context, "Response is not successful: " + imageName, Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(Call<ResponseBody> call, Throwable t) {
+                Toast.makeText(getActivity(), "An error occurred", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    public void getMessages(String from, String to) {
+        Call<MessagesHistory[]> getMessageHistory = apiClient.getMessageHistory(from, to);
+        getMessageHistory.enqueue(new Callback<MessagesHistory[]>() {
+            @Override
+            public void onResponse(Call<MessagesHistory[]> call, Response<MessagesHistory[]> response) {
+                if (response.isSuccessful()) {
+
+                    messagesHistory = response.body();
+
+                    SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault());
+                    Date convertDate = new Date();
+                    dateFormat.setTimeZone(TimeZone.getTimeZone("Etc/UTC"));
+
+                    for (int i = 0; i < messagesHistory.length; i++) {
+                        String messageSender = messagesHistory[i].getSender();
+                        String messageReceiver = messagesHistory[i].getReceiver();
+                        final String messages = messagesHistory[i].getText();
+                        String date = messagesHistory[i].getSendtime();
+
+                        try {
+                            convertDate = dateFormat.parse(date);
+                            convertDate.getTime();
+                        } catch (ParseException e) {
+                            e.printStackTrace();
+                        }
+
+                        if (messageSender.equals(myUserName) && messageReceiver.equals(sender)) {
+                            if (messages.startsWith("gago+")) {
+                                getImagesHistory(convertDate, messages, "0");
+                                getMessagesHistory(convertDate, messages, "0", true);
+                            } else {
+                                getMessagesHistory(convertDate, messages, "0", false);
+                            }
+                        }
+                        if (messageReceiver.equals(myUserName) && messageSender.equals(sender)) {
+                            if (messages.startsWith("gago+")) {
+                                getMessagesHistory(convertDate, messages, "1", true);
+                                getImagesHistory(convertDate, messages, "1");
+                            } else {
+                                getMessagesHistory(convertDate, messages, "1", false);
+                            }
+                        }
+                    }
+                } else {
+                    Toast.makeText(context, "Something went wrong", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public void onFailure(Call<MessagesHistory[]> call, Throwable t) {
+                Toast.makeText(context, "An error occurred", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    public void getImagesHistory(final Date date, String messages, final String id) {
+        String cutMessage = messages.substring(5, messages.length());
+        Call<ResponseBody> getChatImageCall = apiClient.getImages(cutMessage, CHAT_IMAGE_TYPE);
+        getChatImageCall.enqueue(new Callback<ResponseBody>() {
+            @Override
+            public void onResponse(Call<ResponseBody> call, final Response<ResponseBody> response) {
+                if (response.isSuccessful()) {
+                    try {
+                        arrayOfImages.add(response.body().bytes());
+                        for (int i = 0; i < arrayOfImages.size(); i++) {
+                            message = MessagesFixtures.getImageBytesMessage(arrayOfImages.get(i), id);
+                            message.setCreatedAt(date);
+                            arrayOfMessages.add(message);
+                        }
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    Toast.makeText(getActivity(), "Something went wrong", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public void onFailure(Call<ResponseBody> call, Throwable t) {
+                Toast.makeText(getActivity(), "An error occurred", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+
+    public void getMessagesHistory(Date startDate, String historyMessages, String id, boolean isImage) {
+
+        if (isImage) {
+            message = MessagesFixtures.getImageMessage(id);
+        } else {
+            message = MessagesFixtures.getTextMessage(historyMessages, id);
+        }
+        message.setCreatedAt(startDate);
+        arrayOfMessages.add(message);
+        messagesAdapter.addToEnd(arrayOfMessages, false);
+    }
+
+    private void socketCall() {
+        sc = new Socket(url);
+
+        sc.setListener(new BasicListener() {
+
+            public void onConnected(Socket socket, Map<String, List<String>> headers) {
+                Log.d(TAG, "Connected to endpoint");
+
+                JSONObject authObject = new JSONObject();
+
+                try {
+                    authObject.put("accessToken", SharedPreferencesManager.getInstance().getUserData().getAccessToken());
+                    authObject.put("refreshToken", SharedPreferencesManager.getInstance().getUserData().getRefreshToken());
+                    Log.d(TAG, "This is access token: " + SharedPreferencesManager.getInstance().getUserData().getAccessToken());
+                    Log.d(TAG, "This is refresh token: " + SharedPreferencesManager.getInstance().getUserData().getRefreshToken());
+
+                    sc.emit("auth", authObject, new Ack() {
+                        @Override
+                        public void call(String name, Object error, Object data) {
+                            Log.d(TAG, "Authorized successfully : " + data + " ,  name is: " + name);
+                            Log.d(TAG, "You have error: " + error);
+
+                            if (error != null) {
+                                Toast.makeText(context, "Error in auth emit part", Toast.LENGTH_SHORT).show();
+                            } else {
+                                messageInput.setInputListener(new MessageInput.InputListener() {
+                                    @Override
+                                    public boolean onSubmit(CharSequence input) {
+                                        JSONObject messageObject = new JSONObject();
+
+                                        try {
+                                            messageObject.put("msg", input.toString());
+                                            messageObject.put("user", sender);
+                                            sc.emit("messaging", messageObject);
+                                        } catch (JSONException e) {
+                                            e.printStackTrace();
+                                            return false;
+                                        }
+
+                                        sc.getChannelByName(myUserName).publish(input.toString(), new Ack() {
+                                            @Override
+                                            public void call(String name, Object error, Object data) {
+                                                Log.d(TAG, "Published message to channel: " + name + " successfully");
+                                            }
+                                        });
+                                        messagesAdapter.addToStart(MessagesFixtures.getTextMessage(input.toString(), "0"), true);
+                                        return true;
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+
+                } catch (JSONException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            public void onDisconnected(Socket socket, WebSocketFrame serverCloseFrame, WebSocketFrame clientCloseFrame, boolean closedByServer) {
+                Log.d(TAG, "Disconnected from end-point");
+            }
+
+            public void onConnectError(Socket socket, WebSocketException exception) {
+                Log.d(TAG, "Got connect error " + exception);
+            }
+
+            public void onSetAuthToken(String token, Socket socket) {
+                Log.d(TAG, "Set auth token got called. Here is your token: " + token);
+            }
+
+            public void onAuthentication(Socket socket, Boolean status) {
+                if (status) {
+                    Log.d(TAG, "socket is authenticated");
+                } else {
+                    Log.d(TAG, "Authentication is required (optional)");
+                }
+
+                Socket.Channel channel = sc.createChannel(myUserName);
+                channel.subscribe();
+                channel.onMessage(new Emitter.Listener() {
+                    @Override
+                    public void call(String name, final Object data) {
+                        Log.d(TAG, "Got data from server: " + data.toString());
+
+                        try {
+                            JSONObject object = new JSONObject(data.toString());
+                            final String message = object.getString("message");
+                            String from = object.getString("from");
+
+                            if (sender.equals(from)) {
+                                // 3) Gets image name with socket
+                                if (message.startsWith("gago+")) {
+                                    Log.d(TAG, "That's image message: " + message);
+                                    final String cutMessage = message.substring(5, message.length());
+
+                                    // 4) Request image with name that got from server
+                                    getChatImage(cutMessage, false, "1");
+
+                                    tokenUpdaterCallback = new TokenUpdaterCallback() {
+                                        @Override
+                                        public void updateToken() {
+                                            getChatImage(cutMessage, true, "1");
+                                        }
+                                    };
+
+                                    Log.d(TAG, cutMessage);
+                                } else {
+                                    getActivity().runOnUiThread(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            messagesAdapter.addToStart(MessagesFixtures.getTextMessage(message + "  " + sender, "1"), true);
+                                        }
+                                    });
+                                }
+                                Log.d(TAG, "That's your message: " + message);
+                            }
+                        } catch (JSONException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                });
+            }
+        });
+        sc.setReconnection(new ReconnectStrategy().setDelay(2000).setMaxAttempts(10));
+        sc.connectAsync();
+        sc.disableLogging();
+    }
+
+    @Override
+    public void onAddAttachments() {
+        requestPermission();
+    }
+
+    private void requestPermission() {
+        requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, MY_PERMISSIONS_REQUEST_READ_EXTERNAL_STORAGE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        switch (requestCode) {
+            case MY_PERMISSIONS_REQUEST_READ_EXTERNAL_STORAGE:
+                if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    // Permission granted
+                    Intent intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+                    intent.setType("image/*");
+                    startActivityForResult(intent, SELECTED_PICTURE);
+                } else {
+                    // Permission Denied
+                    Toast.makeText(getActivity(), "Permission Denied", Toast.LENGTH_SHORT)
+                            .show();
+                }
+                break;
+            default:
+                super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        }
+    }
+
+    @Override
+    public String getFragmentName() {
+        return "ChatFragment";
+    }
+
+    @Override
+    public void onDestroyView() {
+        super.onDestroyView();
+        if (sc.getChannelByName(myUserName) != null) {
+            sc.getChannelByName(myUserName).unsubscribe();
+        }
+        sc.disconnect();
+    }
+}
